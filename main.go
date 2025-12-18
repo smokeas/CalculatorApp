@@ -2,19 +2,40 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/Knetic/govaluate"
 	"github.com/google/uuid"
 	"github.com/labstack/echo"
 	"github.com/labstack/echo/middleware"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
+
+var db *gorm.DB
+
+func initDB() { // dsn - источник данных
+	dsn := "host=localhost user=postgres password=secret123 dbname=postgres port=5432 sslmode=disable"
+
+	var err error
+
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		log.Fatalf("Could not connect to database: %v", err)
+	}
+
+	//AutoMigrate отвечает за то чтобы в БД создалась модель Calculation
+	if err := db.AutoMigrate(&Calculation{}); err != nil {
+		log.Fatalf("Could not migrate: %v", err)
+	}
+}
 
 // get - список операций ; post - передача выражения для расчета
 
 // структура выражения которая будет хранится в бд
 type Calculation struct {
-	ID         string `json:"id"`
+	ID         string `gorm:"primaryKey" json:"id"`
 	Expression string `json:"expression"` // выражение
 	Result     string `json:"result"`
 }
@@ -25,7 +46,7 @@ type CalculationRequest struct {
 }
 
 // глобальная переменная - слайс , нужно инициализировать (иначе при попытке сайта получить запрос будет nul и ошибка возращатся )
-var calculations = []Calculation{}
+//var calculations = []Calculation{}
 
 // принимает строку       возращает строку и ошибку
 func CalculateExpression(expression string) (string, error) {
@@ -40,6 +61,8 @@ func CalculateExpression(expression string) (string, error) {
 	return fmt.Sprintf("%v", result), err
 }
 
+// Основные методы ORM  -  Create , Read , Update , Delete  (crud)
+
 func getCalculations(c echo.Context) error {
 	/*Клиент (браузер)
 	    ↓ HTTP GET запрос
@@ -47,8 +70,13 @@ func getCalculations(c echo.Context) error {
 	    ↓ c.JSON() формирует JSON ответ
 	    ↓ return отправляет ошибку (или nil)
 	Клиент получает JSON в теле ответа*/
+	var calculations []Calculation
+
+	if err := db.Find(&calculations).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Could not get calculations"})
+	}
+
 	return c.JSON(http.StatusOK, calculations)
-	// возращает JSON со статус кодом OK И слайс предыдуших выражений
 }
 
 func postCalculations(c echo.Context) error {
@@ -70,9 +98,17 @@ func postCalculations(c echo.Context) error {
 		ID:         uuid.NewString(),
 		Expression: req.Expression, // берем то выражение которое пришло с сайта
 		Result:     result,
-	} //                     куда          что
-	calculations = append(calculations, calc) // Первый параметр функции - срез, в который надо добавить, а второй параметр - значение, которое нужно добавить
+	}
+
+	if err := db.Create(&calc).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Could not add calculations"})
+	}
+
 	return c.JSON(http.StatusCreated, calc)
+
+	/*                     куда          что
+	calculations = append(calculations, calc) // Первый параметр функции - срез, в который надо добавить, а второй параметр - значение, которое нужно добавить
+	return c.JSON(http.StatusCreated, calc)*/
 }
 
 func patchCalculations(c echo.Context) error {
@@ -91,31 +127,51 @@ func patchCalculations(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid expression"})
 	}
 	//конец
-
-	//перебираем слайс(историю) вычислений
-	for i, calculation := range calculations {
-		if calculation.ID == id { // и если ID равен тому который мы передали (id)
-			calculations[i].Expression = req.Expression // обновляем рузультат
-			calculations[i].Result = result
-			return c.JSON(http.StatusOK, calculations[i])
+	/*
+		//перебираем слайс(историю) вычислений
+		for i, calculation := range calculations {
+			if calculation.ID == id { // и если ID равен тому который мы передали (id)
+				calculations[i].Expression = req.Expression // обновляем рузультат
+				calculations[i].Result = result
+				return c.JSON(http.StatusOK, calculations[i])
+			}
 		}
+	*/
+	var Calc Calculation // выражение которое хотим заменить
+	if err := db.First(&Calc, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Could not find expression"}) //выражение не найдено (ошибка со сторон клиента)
 	}
-	return c.JSON(http.StatusBadRequest, map[string]string{"error": "Calcculation not found"}) // вычисление не найдено
+
+	Calc.Expression = req.Expression
+	Calc.Result = result
+
+	if err := db.Save(&Calc).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Could not update calculations"})
+	}
+
+	return c.JSON(http.StatusOK, Calc)
 }
 
 func deleteCalculations(c echo.Context) error {
 	id := c.Param("id")
 
-	for i, calculation := range calculations {
-		if calculation.ID == id {
-			calculations = append(calculations[:i], calculations[i+1:]...) // удаление элемента из слайса
-			return c.NoContent(http.StatusNoContent)                       //  NoContent - возращает ответ без тела , и статус код
+	/*
+		for i, calculation := range calculations {
+			if calculation.ID == id {
+				calculations = append(calculations[:i], calculations[i+1:]...) // удаление элемента из слайса
+				return c.NoContent(http.StatusNoContent)                       //  NoContent - возращает ответ без тела , и статус код
+			}
 		}
+	*/
+	if err := db.Delete(&Calculation{}, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Could not delete calculations"})
 	}
-	return c.JSON(http.StatusBadRequest, map[string]string{"error": "Calcculation not found"})
+	return c.NoContent(http.StatusNoContent)
+	//return c.JSON(http.StatusBadRequest, map[string]string{"error": "Calcculation not found"})
 }
 
 func main() {
+	initDB()
 	e := echo.New() // инициализировать (создать) обработчик echo
 
 	e.Use(middleware.CORS())   // CORS - на нашем пк сайт пытается отправить данные на сервер . цепь в нашем запросек
